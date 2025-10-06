@@ -24,15 +24,10 @@ import { MqttIcon } from "@/components/icons/mqtt-icon"
 import { FolderIcon } from "@/components/icons/folder-icon"
 import { GridIcon } from "@/components/icons/grid-icon"
 import { FontIcon } from "@/components/icons/font-icon"
-import { FontPreviewDialog } from "@/components/font-preview-dialog"
-import { GitHubFontLoaderDialog } from "@/components/github-font-loader-dialog"
-import { HardwareButtonActionDialog } from "@/components/hardware-button-action-dialog"
-import { BDFFont } from "@/lib/bdffont"
-import { Trash2 } from "@/components/icons/trash-2" // Import Trash2 icon
-import { GitHubIcon } from "@/components/icons/github-icon"
-import { ButtonIcon } from "@/components/icons/button-icon"
 import { AdornmentIcon } from "@/components/icons/adornment-icon"
-import { parseXLFD, formatXLFDDisplayName, type XLFDFont } from "@/lib/xlfd-parser"
+// Removed BDF font handling; using TTF via URL
+import { Trash2 } from "@/components/icons/trash-2" // Import Trash2 icon
+import { AddTtfFontDialog } from "@/components/add-ttf-font-dialog"
 import { useToast } from "@/hooks/use-toast"
 
 const ScreensIcon = ({ className }: { className?: string }) => (
@@ -74,10 +69,9 @@ interface ScreenmanProject {
   fonts?: {
     id: string
     name: string
-    displayName: string
-    path: string
-    size?: number
-    xlfd?: XLFDFont // Added XLFD metadata
+    size: number
+    url: string
+    baselineOffset: number
   }[]
   nextId?: number // Added nextId for object/screen IDs
   adornment?: string // Added adornment field
@@ -128,11 +122,8 @@ export function ProjectSettingsDialog({
     type: "text" as "numeric" | "text",
     examples: [] as string[],
   })
-  const [fontPreviewOpen, setFontPreviewOpen] = useState(false)
-  const [selectedFontForPreview, setSelectedFontForPreview] = useState<any>(null)
-  const [githubFontLoaderOpen, setGithubFontLoaderOpen] = useState(false) // Added GitHub font loader state
-  const fontInputRef = useRef<HTMLInputElement>(null)
-  const adornmentFileInputRef = useRef<HTMLInputElement>(null)
+  const [editFontOpen, setEditFontOpen] = useState(false)
+  const [fontBeingEdited, setFontBeingEdited] = useState<any>(null)
   const [editedScreenNames, setEditedScreenNames] = useState<Record<string, string>>({})
   const [addHardwareButtonDialogOpen, setAddHardwareButtonDialogOpen] = useState(false)
   const [editingHardwareButton, setEditingHardwareButton] = useState<HardwareButton | null>(null)
@@ -153,6 +144,7 @@ export function ProjectSettingsDialog({
   const [actionDialogOpen, setActionDialogOpen] = useState(false)
   const [buttonForAction, setButtonForAction] = useState<HardwareButton | null>(null)
   const { toast } = useToast()
+  const adornmentFileInputRef = useRef<HTMLInputElement>(null)
 
   const updateProjectName = (name: string) => {
     onProjectUpdate({
@@ -320,68 +312,23 @@ export function ProjectSettingsDialog({
     }
   }
 
-  const handleFontUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    if (!file.name.endsWith(".bdf")) {
-      alert("Please select a .bdf font file")
-      return
-    }
-
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      try {
-        const bdfContent = e.target?.result as string
-        const bdfFont = new BDFFont(bdfContent)
-        const fontName = bdfFont.FONT || file.name.replace(".bdf", "")
-
-        const xlfdData = fontName ? parseXLFD(fontName) : null
-        const displayName = xlfdData ? formatXLFDDisplayName(xlfdData) : fontName
-
-        const fontId = `font-${Date.now()}`
-        const fileName = file.name.replace(/[^a-zA-Z0-9\-_.]/g, "_")
-
-        const newFont = {
-          id: fontId,
-          name: fontName,
-          displayName: displayName,
-          path: `fonts/${fileName}`, // Path to font file in fonts/ directory
-          size: file.size,
-          xlfd: xlfdData || undefined,
-          data: bdfContent, // Temporarily store data for preview, will be removed on export
-        }
-
-        onProjectUpdate({
-          ...project,
-          fonts: [...fonts, newFont],
-        })
-
-        console.log("[v0] Added new font:", newFont.displayName)
-        console.log("[v0] XLFD metadata:", xlfdData)
-      } catch (error) {
-        console.error("[v0] Error parsing BDF font:", error)
-        alert("Failed to parse BDF font file. Please check the file format.")
-      }
-    }
-    reader.readAsText(file)
-
-    event.target.value = ""
-  }
-
-  const handleGithubFontLoaded = (fontData: any) => {
+  const [addTtfOpen, setAddTtfOpen] = useState(false)
+  const handleAddTtfFont = () => setAddTtfOpen(true)
+  const handleConfirmAddTtf = (font: { id: string; name: string; size: number; url: string; baselineOffset: number }) => {
+    const newFont = { ...font, id: `font-${project.nextId}` }
+    console.log(`[Font Metrics] Adding new font: ${newFont.name} (ID: ${newFont.id}) - Size: ${newFont.size}px, baselineOffset: ${newFont.baselineOffset.toFixed(2)}px`)
     onProjectUpdate({
       ...project,
-      fonts: [...fonts, fontData],
+      fonts: [...(project.fonts || []), newFont],
+      nextId: (project.nextId || 0) + 1,
     })
-
-    console.log("[v0] Added font from GitHub:", fontData.displayName)
-    console.log("[v0] XLFD metadata:", fontData.xlfd)
+    setAddTtfOpen(false)
   }
 
-  const openFontPreview = (font: any) => {
-    setSelectedFontForPreview(font)
-    setFontPreviewOpen(true)
+
+  const openFontEdit = (font: any) => {
+    setFontBeingEdited(font)
+    setEditFontOpen(true)
   }
 
   const deleteFont = (fontId: string) => {
@@ -493,6 +440,215 @@ export function ProjectSettingsDialog({
 
   const getScreenName = (screenId: string) => {
     return editedScreenNames[screenId] ?? project.screens.find((s) => s.id === screenId)?.name ?? ""
+  }
+
+  const handleAdornmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    console.log("[v0] handleAdornmentUpload called")
+    const file = event.target.files?.[0]
+    console.log("[v0] Selected file:", file?.name, file?.type, file?.size)
+
+    if (!file) {
+      console.log("[v0] No file selected")
+      return
+    }
+
+    if (!file.name.toLowerCase().endsWith(".svg")) {
+      console.log("[v0] Invalid file type:", file.name)
+      toast({
+        title: "Invalid file type",
+        description: "Please select an SVG file.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      console.log("[v0] Reading SVG file...")
+      const svgText = await file.text()
+      console.log("[v0] SVG text length:", svgText.length)
+      console.log("[v0] SVG preview:", svgText.substring(0, 200))
+
+      // Validate SVG and extract drawing-area dimensions
+      console.log("[v0] Validating and extracting drawing area...")
+      const drawingAreaInfo = validateAndExtractDrawingArea(svgText)
+      console.log("[v0] Drawing area info:", drawingAreaInfo)
+
+      if (!drawingAreaInfo) {
+        console.log("[v0] Invalid SVG - no valid screen element found")
+        toast({
+          title: "Invalid SVG",
+          description: "SVG must contain a rect element with ID 'screen' as the first element.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      console.log("[v0] Encoding SVG to base64...")
+      // Convert modified SVG to data URL
+      const encodedSvg = `data:image/svg+xml;base64,${btoa(drawingAreaInfo.modifiedSvgText)}`
+      console.log("[v0] Encoded SVG length:", encodedSvg.length)
+
+      // Update project with adornment and new dimensions
+       console.log("[v0] Updating project with adornment...")
+       
+       onProjectUpdate({
+         ...project,
+         adornment: encodedSvg,
+         adornmentDrawingArea: {
+           x: drawingAreaInfo.x,
+           y: drawingAreaInfo.y,
+           width: drawingAreaInfo.width,
+           height: drawingAreaInfo.height,
+           svgViewBox: drawingAreaInfo.svgViewBox,
+         },
+         screenWidth: drawingAreaInfo.width,
+         screenHeight: drawingAreaInfo.height,
+       })
+
+      console.log("[v0] Adornment added successfully")
+      toast({
+        title: "Adornment added",
+        description: `Project dimensions updated to ${drawingAreaInfo.width}×${drawingAreaInfo.height}px based on drawing-area.`,
+      })
+    } catch (error) {
+      console.error("[v0] Error processing adornment:", error)
+      toast({
+        title: "Error",
+        description: "Failed to process adornment file.",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleRemoveAdornment = () => {
+    onProjectUpdate({
+      ...project,
+      adornment: undefined,
+      adornmentDrawingArea: undefined,
+    })
+    toast({
+      title: "Adornment removed",
+      description: "Project adornment has been removed.",
+    })
+  }
+
+  const validateAndExtractDrawingArea = (
+    svgText: string,
+  ): {
+    width: number
+    height: number
+    x: number
+    y: number
+    svgViewBox: { x: number; y: number; width: number; height: number }
+    modifiedSvgText: string
+    buttonElements: string[]
+  } | null => {
+    try {
+      const parser = new DOMParser()
+      const doc = parser.parseFromString(svgText, "image/svg+xml")
+
+      // Check for parsing errors
+      if (doc.querySelector("parsererror")) {
+        console.log("[v0] SVG parsing error detected")
+        return null
+      }
+
+      const svgElement = doc.querySelector("svg")
+      if (!svgElement) {
+        console.log("[v0] No SVG element found")
+        return null
+      }
+
+      let screenElement: Element | null = null
+
+      // First, try to find as direct child of svg
+      for (const child of Array.from(svgElement.children)) {
+        if (child.tagName.toLowerCase() === "rect" && child.getAttribute("id") === "screen") {
+          screenElement = child
+          break
+        }
+      }
+
+      // If not found, search within <g> elements (common in Inkscape SVGs)
+      if (!screenElement) {
+        screenElement = svgElement.querySelector('g > rect[id="screen"]')
+      }
+
+      // If still not found, do a deep search anywhere in the SVG
+      if (!screenElement) {
+        screenElement = svgElement.querySelector('rect[id="screen"]')
+      }
+
+      if (!screenElement) {
+        console.log("[v0] No rect element with id='screen' found in SVG")
+        return null
+      }
+
+      // Extract SVG viewBox
+      const viewBox = svgElement.getAttribute("viewBox")
+      let svgViewBox = { x: 0, y: 0, width: 0, height: 0 }
+
+      if (viewBox) {
+        const viewBoxValues = viewBox.split(/\s+|,/)
+        if (viewBoxValues.length >= 4) {
+          svgViewBox = {
+            x: Number.parseFloat(viewBoxValues[0]) || 0,
+            y: Number.parseFloat(viewBoxValues[1]) || 0,
+            width: Number.parseFloat(viewBoxValues[2]) || 0,
+            height: Number.parseFloat(viewBoxValues[3]) || 0,
+          }
+        }
+      } else {
+        // If no viewBox, use width/height attributes
+        const svgWidth = Number.parseFloat(svgElement.getAttribute("width") || "0") || 0
+        const svgHeight = Number.parseFloat(svgElement.getAttribute("height") || "0") || 0
+        svgViewBox = { x: 0, y: 0, width: svgWidth, height: svgHeight }
+      }
+
+      // Extract screen rect dimensions
+      const width = Number.parseFloat(screenElement.getAttribute("width") || "0")
+      const height = Number.parseFloat(screenElement.getAttribute("height") || "0")
+      const x = Number.parseFloat(screenElement.getAttribute("x") || "0")
+      const y = Number.parseFloat(screenElement.getAttribute("y") || "0")
+
+      if (width <= 0 || height <= 0) {
+        console.log("[v0] Invalid screen dimensions:", { width, height })
+        return null
+      }
+
+       // Set the screen element's style to transparent
+       screenElement.setAttribute("style", "fill:none;fill-opacity:1;stroke:none;stroke-width:0;stroke-dasharray:none")
+
+       // Scan for button elements (IDs starting with "button")
+       const buttonElements: string[] = []
+       const allElements = doc.querySelectorAll('[id^="button"]')
+       allElements.forEach(element => {
+         const id = element.getAttribute('id')
+         if (id && id.startsWith('button')) {
+           buttonElements.push(id)
+         }
+       })
+
+       console.log("[v0] Found button elements:", buttonElements)
+
+       // Convert the modified DOM back to SVG text
+       const serializer = new XMLSerializer()
+       const modifiedSvgText = serializer.serializeToString(doc)
+
+       console.log("[v0] Successfully extracted drawing area:", { width, height, x, y })
+       return {
+         width: Math.round(width),
+         height: Math.round(height),
+         x: Math.round(x),
+         y: Math.round(y),
+         svgViewBox,
+         modifiedSvgText,
+         buttonElements,
+       }
+    } catch (error) {
+      console.error("[v0] Error in validateAndExtractDrawingArea:", error)
+      return null
+    }
   }
 
   const currentScreen = project.screens.find((s) => s.id === currentScreenId)
@@ -911,7 +1067,6 @@ export function ProjectSettingsDialog({
     { id: "screens", label: "Screens", icon: ScreensIcon },
     { id: "assets", label: "Assets", icon: FolderIcon },
     { id: "fonts", label: "Fonts", icon: FontIcon }, // Added Fonts tab
-    { id: "hardware-buttons", label: "Hardware Buttons", icon: ButtonIcon }, // Added Hardware Buttons tab
     { id: "adornment", label: "Adornment", icon: AdornmentIcon }, // Added Adornment tab
     { id: "snapgrid", label: "Snap Grid", icon: GridIcon },
     { id: "topics", label: "Topics", icon: MqttIcon },
@@ -1373,6 +1528,88 @@ export function ProjectSettingsDialog({
                   </div>
                 )}
 
+                {activeTab === "adornment" && (
+                  <div className="p-6 flex flex-col h-full min-h-0">
+                    <div className="flex items-center justify-between flex-shrink-0 mb-4">
+                      <Label className="text-sm font-medium">Project Adornment</Label>
+                      {project.adornment ? (
+                        <Button size="sm" variant="destructive" onClick={handleRemoveAdornment}>
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Remove Adornment
+                        </Button>
+                      ) : (
+                        <Button size="sm" onClick={() => adornmentFileInputRef.current?.click()}>
+                          <Upload className="h-4 w-4 mr-2" />
+                          Add Adornment
+                        </Button>
+                      )}
+                    </div>
+
+                    <input
+                      ref={adornmentFileInputRef}
+                      type="file"
+                      accept=".svg"
+                      onChange={handleAdornmentUpload}
+                      style={{ display: "none" }}
+                    />
+
+                    <div className="flex-1 min-h-0 border rounded-md overflow-hidden">
+                      <ScrollArea className="h-[calc(600px-200px)]">
+                        <div className="p-4">
+                          {project.adornment ? (
+                            <div className="space-y-4">
+                              <div className="text-sm text-muted-foreground">
+                                An adornment is currently set for this project. The screen element from the SVG will be
+                                used as the drawing area, and any elements with IDs starting with "button" will be
+                                treated as hardware buttons.
+                              </div>
+                              
+                              <div className="text-xs text-muted-foreground mb-2">Adornment Preview:</div>
+                              <div className="border rounded p-2 bg-muted/20">
+                                <div
+                                  className="w-full h-32 flex items-center justify-center"
+                                  dangerouslySetInnerHTML={{
+                                    __html: (() => {
+                                      try {
+                                        let svgContent = project.adornment
+                                        if (project.adornment.startsWith("data:image/svg+xml;base64,")) {
+                                          svgContent = atob(project.adornment.replace("data:image/svg+xml;base64,", ""))
+                                        } else if (project.adornment.startsWith("data:image/svg+xml,")) {
+                                          svgContent = decodeURIComponent(
+                                            project.adornment.replace("data:image/svg+xml,", ""),
+                                          )
+                                        }
+                                        
+                                        // Scale down the SVG for preview
+                                        const scaledSvg = svgContent.replace(
+                                          /<svg([^>]*)>/,
+                                          '<svg$1 style="width: 100%; height: auto; max-height: 128px;">'
+                                        )
+                                        
+                                        return scaledSvg
+                                      } catch (error) {
+                                        console.error("Error rendering adornment preview:", error)
+                                        return '<div class="text-center text-muted-foreground">Preview unavailable</div>'
+                                      }
+                                    })(),
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-center text-muted-foreground py-8">
+                              <div className="mb-2">No adornment set</div>
+                              <div className="text-xs">
+                                Upload an SVG file with a "screen" element to set a project adornment
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  </div>
+                )}
+
                 {activeTab === "snapgrid" && (
                   <div className="p-6 overflow-y-auto">
                     <div className="space-y-4">
@@ -1509,24 +1746,13 @@ export function ProjectSettingsDialog({
                     <div className="flex items-center justify-between flex-shrink-0 mb-4">
                       <Label className="text-sm font-medium">Fonts ({fonts.length})</Label>
                       <div className="flex gap-2">
-                        <Button size="sm" variant="outline" onClick={() => setGithubFontLoaderOpen(true)}>
-                          <GitHubIcon className="h-4 w-4 mr-2" />
-                          Load from u8g2 GitHub repo
-                        </Button>
-                        <Button size="sm" onClick={() => fontInputRef.current?.click()}>
+                        <Button size="sm" onClick={handleAddTtfFont}>
                           <Upload className="h-4 w-4 mr-2" />
-                          Add Font
+                          Add TTF Font
                         </Button>
                       </div>
                     </div>
 
-                    <input
-                      ref={fontInputRef}
-                      type="file"
-                      accept=".bdf"
-                      onChange={handleFontUpload}
-                      className="hidden"
-                    />
 
                     <div className="flex-1 min-h-0 border rounded-md overflow-hidden">
                       <ScrollArea className="h-[calc(600px-200px)]">
@@ -1535,7 +1761,7 @@ export function ProjectSettingsDialog({
                             <div className="text-sm text-muted-foreground text-center py-8">
                               No fonts yet
                               <br />
-                              Upload .bdf bitmap fonts or load from u8g2 GitHub repository
+                              Add TTF fonts by URL or load from GitHub repository
                             </div>
                           ) : (
                             <div className="space-y-2">
@@ -1547,39 +1773,25 @@ export function ProjectSettingsDialog({
                                     </div>
                                     <div className="flex-1 min-w-0">
                                       <div className="text-sm font-medium truncate">
-                                        {font.displayName || font.name}
+                                        {font.name}
                                       </div>
                                       <div className="text-xs text-muted-foreground space-y-0.5">
-                                        {font.xlfd && (
-                                          <>
-                                            <div>
-                                              {font.xlfd.foundry && `${font.xlfd.foundry} • `}
-                                              {font.xlfd.familyName && `${font.xlfd.familyName} • `}
-                                              {font.xlfd.weightName && font.xlfd.weightName}
-                                            </div>
-                                            <div>
-                                              {font.xlfd.pixelSize && `${font.xlfd.pixelSize}px`}
-                                              {font.xlfd.charsetRegistry &&
-                                                font.xlfd.charsetEncoding &&
-                                                ` • ${font.xlfd.charsetRegistry}-${font.xlfd.charsetEncoding}`}
-                                            </div>
-                                          </>
-                                        )}
-                                        {font.size && (
-                                          <div className="text-muted-foreground/70">
-                                            {Math.round(font.size / 1024)}KB
-                                          </div>
-                                        )}
+                                        <div>
+                                          {font.size}px • Baseline offset: {font.baselineOffset.toFixed(1)}px
+                                        </div>
+                                        <div className="text-muted-foreground/70">
+                                          TTF Font
+                                        </div>
                                       </div>
                                     </div>
                                     <div className="flex gap-2">
                                       <Button
                                         size="sm"
                                         variant="outline"
-                                        onClick={() => openFontPreview(font)}
+                                        onClick={() => openFontEdit(font)}
                                         className="text-xs"
                                       >
-                                        Preview
+                                        Edit
                                       </Button>
                                       <Button
                                         size="sm"
@@ -1793,6 +2005,8 @@ export function ProjectSettingsDialog({
         </DialogContent>
       </Dialog>
 
+    <AddTtfFontDialog isOpen={addTtfOpen} onClose={() => setAddTtfOpen(false)} onAdd={handleConfirmAddTtf} />
+
       <Dialog open={addTopicDialogOpen} onOpenChange={setAddTopicDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -1898,20 +2112,22 @@ export function ProjectSettingsDialog({
         onUpdateAsset={updateAssetData}
       />
 
-      <FontPreviewDialog
-        isOpen={fontPreviewOpen}
-        onClose={() => {
-          setFontPreviewOpen(false)
-          setSelectedFontForPreview(null)
+      <AddTtfFontDialog
+        isOpen={editFontOpen}
+        onClose={() => setEditFontOpen(false)}
+        onAdd={(updated) => {
+          console.log(`[Font Metrics] Updating font: ${updated.name} (ID: ${updated.id}) - Size: ${updated.size}px, baselineOffset: ${updated.baselineOffset.toFixed(2)}px`)
+          onProjectUpdate({
+            ...project,
+            fonts: (project.fonts || []).map((f) => (f.id === updated.id ? { ...f, name: updated.name, size: updated.size, url: updated.url, baselineOffset: updated.baselineOffset } : f)),
+          })
+          setEditFontOpen(false)
+          setFontBeingEdited(null)
         }}
-        font={selectedFontForPreview}
+        mode="edit"
+        initialFont={fontBeingEdited}
       />
 
-      <GitHubFontLoaderDialog
-        isOpen={githubFontLoaderOpen}
-        onClose={() => setGithubFontLoaderOpen(false)}
-        onFontLoaded={handleGithubFontLoaded}
-      />
 
       {setShowMqttDiscovery && onTopicsSelected && (
         <MqttDiscoveryDialog

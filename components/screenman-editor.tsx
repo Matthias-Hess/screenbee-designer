@@ -46,8 +46,7 @@ export interface ScreenmanProject {
   screenWidth: number
   screenHeight: number
   adornment?: string // SVG data for project adornment
-  adornmentDrawingArea?: {
-    // Information about the drawing-area element in the adornment SVG
+  adornmentDrawingArea?: { // Information about the drawing-area element in the adornment SVG
     x: number
     y: number
     width: number
@@ -76,12 +75,10 @@ export interface ScreenmanAsset {
 
 export interface ScreenmanFont {
   id: string
-  name: string
-  displayName: string
-  path: string // Path within the project, e.g., "fonts/myfont.bdf"
-  size: number // Font size in pixels
-  xlfd: string // XLFD format string for font properties
-  data?: string // Font data (e.g., BDF content) - only loaded when project is active
+  name: string // Human-friendly name to display in UI
+  size: number // Font size in pixels to render at design time
+  url: string // Direct URL to a downloadable TTF file (data URL)
+  baselineOffset: number // Distance from top of bounding box to baseline (ascent)
 }
 
 export interface PropertyPanelProps {
@@ -146,9 +143,6 @@ export interface ColorRecoloration {
 }
 
 export const extractColorsFromSVG = (svgContent: string): string[] => {
-  console.log("[v0] Extracting colors from SVG...")
-  console.log("[v0] SVG content length:", svgContent.length)
-  console.log("[v0] SVG content preview:", svgContent.substring(0, 200))
 
   let actualSvgContent = svgContent
 
@@ -156,7 +150,6 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
     try {
       const base64Content = svgContent.replace("data:image/svg+xml;base64,", "")
       actualSvgContent = atob(base64Content)
-      console.log("[v0] Decoded base64 SVG content:", actualSvgContent.substring(0, 200))
     } catch (error) {
       console.error("[v0] Failed to decode base64 SVG:", error)
       return []
@@ -165,7 +158,6 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
     // Handle URL-encoded SVG data URLs
     try {
       actualSvgContent = decodeURIComponent(svgContent.replace("data:image/svg+xml,", ""))
-      console.log("[v0] Decoded URL-encoded SVG content:", actualSvgContent.substring(0, 200))
     } catch (error) {
       console.error("[v0] Failed to decode URL-encoded SVG:", error)
       return []
@@ -179,7 +171,6 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
 
   // 1. Find all hex colors (3 or 6 digits)
   const hexMatches = cleanSvg.match(/#[0-9a-fA-F]{3,6}/g)
-  console.log("[v0] Hex matches found:", hexMatches)
   if (hexMatches) {
     hexMatches.forEach((color) => {
       // Normalize 3-digit hex to 6-digit
@@ -193,7 +184,6 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
 
   // 2. Find RGB/RGBA colors - Fixed regex pattern
   const rgbMatches = cleanSvg.match(/rgba?[^)]+/g)
-  console.log("[v0] RGB matches found:", rgbMatches)
   if (rgbMatches) {
     rgbMatches.forEach((color) => {
       foundColors.add(color.toLowerCase())
@@ -204,7 +194,6 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
   const namedColorPattern =
     /\b(?:red|green|blue|yellow|orange|purple|pink|brown|gray|grey|white|black|cyan|magenta|lime|navy|teal|olive|maroon|silver|aqua|fuchsia|gold|coral|salmon|tan|beige|ivory|cream|khaki|crimson|indigo|violet|plum|orchid|rose|peach|apricot|amber|lemon|mint|jade|emerald|turquoise|azure|sky|steel|slate|charcoal|copper|bronze|brass|honey|caramel|vanilla|linen|snow)\b/gi
   const namedMatches = cleanSvg.match(namedColorPattern)
-  console.log("[v0] Named color matches found:", namedMatches)
   if (namedMatches) {
     namedMatches.forEach((color) => foundColors.add(color.toLowerCase()))
   }
@@ -221,15 +210,11 @@ export const extractColorsFromSVG = (svgContent: string): string[] => {
       foundColors.add(color)
     }
   }
-  console.log("[v0] Fill/stroke matches found:", fillStrokeMatches)
-
   const colors = Array.from(foundColors).sort()
-  console.log("[v0] Final extracted colors:", colors)
   return colors
 }
 
 export const applyColorRecolorations = (svgContent: string, recolorations: ColorRecoloration[]): string => {
-  console.log("[v0] Applying color recolorations:", recolorations)
 
   if (recolorations.length === 0) {
     return svgContent
@@ -286,12 +271,10 @@ export const applyColorRecolorations = (svgContent: string, recolorations: Color
 
       if (beforeMatches && (!afterMatches || beforeMatches.length !== afterMatches.length)) {
         totalReplacements++
-        console.log(`[v0] Replaced #${originalLower} with #${newColor}`)
       }
     })
   })
 
-  console.log("[v0] Total color replacements made:", totalReplacements)
   return modifiedSvg
 }
 
@@ -325,13 +308,11 @@ export function ScreenmanEditor() {
     assets: [],
     fonts: [
       {
-        id: "font-default-helvetica",
-        name: "-Adobe-Helvetica-Medium-R-Normal--20-140-100-100-P-100-ISO10646-1",
-        displayName: "Helvetica 20px",
-        path: "fonts/helvetica-20.bdf",
+        id: "font-default-roboto",
+        name: "Roboto",
         size: 20,
-        xlfd: "-Adobe-Helvetica-Medium-R-Normal--20-140-100-100-P-100-ISO10646-1",
-        // Font data will be loaded from the file
+        url: "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Regular.ttf",
+        baselineOffset: 16, // Approximate baseline offset for Roboto at 20px
       },
     ],
     hardwareButtons: [],
@@ -351,6 +332,16 @@ export function ScreenmanEditor() {
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([])
   const [canvasZoom, setCanvasZoom] = useState(1)
   const [canvasOffset, setCanvasOffset] = useState({ x: 0, y: 0 })
+
+  // Log font metrics when project changes
+  useEffect(() => {
+    if (project.fonts && project.fonts.length > 0) {
+      console.log(`[Font Metrics] Available fonts in project:`)
+      project.fonts.forEach((font, index) => {
+        console.log(`[Font Metrics] ${index + 1}. ${font.name} (ID: ${font.id}) - Size: ${font.size}px, baselineOffset: ${font.baselineOffset?.toFixed(2) || 'undefined'}px`)
+      })
+    }
+  }, [project.fonts])
   const [activeTool, setActiveTool] = useState<
     "select" | "MqttDataField" | "MQTTIconField" | "label" | "icon" | "line" | "box" | "level-indicator"
   >("select")
@@ -367,32 +358,6 @@ export function ScreenmanEditor() {
   const [showHardwareButtonPanel, setShowHardwareButtonPanel] = useState(false)
   const [selectedHardwareButton, setSelectedHardwareButton] = useState<HardwareButton | null>(null)
 
-  useEffect(() => {
-    const loadDefaultFont = async () => {
-      console.log("[v0] Starting to load default Helvetica font...")
-      try {
-        const response = await fetch("/fonts/helvetica-20.bdf")
-        console.log("[v0] Font fetch response status:", response.status, response.ok)
-        if (response.ok) {
-          const fontData = await response.text()
-          console.log("[v0] Font data loaded, length:", fontData.length)
-          setProject((prev) => ({
-            ...prev,
-            fonts: prev.fonts.map((font) =>
-              font.id === "font-default-helvetica" ? { ...font, data: fontData } : font,
-            ),
-          }))
-          console.log("[v0] Default font loaded successfully")
-        } else {
-          console.warn("[v0] Font fetch failed with status:", response.status)
-        }
-      } catch (error) {
-        console.error("[v0] Failed to load default Helvetica font:", error)
-      }
-    }
-
-    loadDefaultFont()
-  }, [])
 
   useEffect(() => {
     console.log("[v0] Current screen changed to:", currentScreenId)
@@ -806,10 +771,14 @@ export function ScreenmanEditor() {
             x: Math.round(x),
             y: Math.round(y),
             width: Math.round(Math.abs(width)),
-            height: Math.round(Math.abs(height)),
+            height: (() => {
+              const f = project.fonts && project.fonts[0]
+              return f?.size ? Math.round(f.size) : Math.round(Math.abs(height))
+            })(),
             properties: {
               topic: undefined, // Changed from topicId to topic
               fontId: project.fonts && project.fonts.length > 0 ? project.fonts[0].id : undefined,
+              fontSize: project.fonts && project.fonts.length > 0 ? (project.fonts[0] as any).size : undefined,
               textAlign: "left",
               backgroundColor: "#ffffff",
               borderColor: "#cccccc",
@@ -840,11 +809,14 @@ export function ScreenmanEditor() {
             x: Math.round(x),
             y: Math.round(y),
             width: Math.round(Math.abs(width)),
-            height: Math.round(Math.abs(height)),
+            height: (() => {
+              const f = project.fonts && project.fonts[0]
+              return f?.size ? Math.round(f.size) : Math.round(Math.abs(height))
+            })(),
             properties: {
               text: "New Label",
               fontId: project.fonts && project.fonts.length > 0 ? project.fonts[0].id : undefined,
-              fontSize: 16,
+              fontSize: project.fonts && project.fonts.length > 0 ? (project.fonts[0] as any).size : 16,
               textAlign: "left",
               backgroundColor: "transparent",
               borderColor: "#cccccc",
@@ -1035,15 +1007,28 @@ export function ScreenmanEditor() {
             path: `assets/${fileName}`, // Added path field pointing to assets folder
           }
         }),
-        fonts: (project.fonts || []).map((font) => ({
-          id: font.id,
-          name: font.name,
-          displayName: font.displayName,
-          path: font.path,
-          size: font.size,
-          xlfd: font.xlfd,
-        })),
-        hardwareButtons: project.hardwareButtons || [],
+        fonts: (project.fonts || []).map((font, index) => {
+          // Support new TTF model: {id,name,size,url,baselineOffset}
+          if ((font as any).url && typeof (font as any).url === "string") {
+            const cleanName = (font.name || `font_${index + 1}`).replace(/[^a-zA-Z0-9\-_.\s]/g, "").trim() || `font_${index + 1}`
+            const fileName = cleanName.toLowerCase().replace(/\s+/g, "_") + ".ttf"
+            return {
+              id: font.id,
+              name: font.name,
+              path: `fonts/${fileName}`,
+              size: font.size,
+              baselineOffset: font.baselineOffset, // Export baseline offset for WYSIWYG
+            }
+          }
+          return {
+            id: (font as any).id,
+            name: (font as any).name,
+            displayName: (font as any).displayName,
+            path: (font as any).path,
+            size: (font as any).size,
+            xlfd: (font as any).xlfd,
+          }
+        }),
         // Include metadata
         exportedAt: new Date().toISOString(),
         version: "1.0.0",
@@ -1111,13 +1096,20 @@ export function ScreenmanEditor() {
 
       const fontsFolder = zip.folder("fonts")
       if (fontsFolder && project.fonts) {
-        project.fonts.forEach((font) => {
-          if (font.data) {
-            // Extract filename from path
-            const fileName = font.path.replace("fonts/", "")
-            // Add the .bdf file content to the fonts folder
-            fontsFolder.file(fileName, font.data)
-            console.log("[v0] Added font to zip:", fileName)
+        project.fonts.forEach((font, index) => {
+          // New TTF flow: font.url is a data URL 'data:font/ttf;base64,...'
+          const anyFont: any = font as any
+          if (anyFont.url && typeof anyFont.url === "string" && anyFont.url.startsWith("data:")) {
+            const [header, base64Data] = anyFont.url.split(",")
+            const extension = header.includes("font/ttf") ? "ttf" : "bin"
+            const cleanName = (font.name || `font_${index + 1}`).replace(/[^a-zA-Z0-9\-_.\s]/g, "").trim() || `font_${index + 1}`
+            let fileName = cleanName.toLowerCase().replace(/\s+/g, "_")
+            if (!fileName.endsWith(`.${extension}`)) fileName += `.${extension}`
+            fontsFolder.file(fileName, base64Data, { base64: true })
+          } else if ((anyFont as any).data && (anyFont as any).path) {
+            // Legacy BDF path (kept for backward compatibility)
+            const fileName = (anyFont as any).path.replace("fonts/", "")
+            fontsFolder.file(fileName, (anyFont as any).data)
           }
         })
       }
@@ -1227,7 +1219,7 @@ export function ScreenmanEditor() {
           }
 
           const fontsFolder = zipContent.folder("fonts")
-          const loadedFonts: any[] = []
+          const loadedFonts: ScreenmanFont[] = []
 
           if (fontsFolder && projectData.fonts) {
             console.log("[v0] Processing fonts from zip file...")
@@ -1238,22 +1230,21 @@ export function ScreenmanEditor() {
                 const zipEntry = fontsFolder.file(fileName)
 
                 if (zipEntry) {
-                  // Read the .bdf file content as text
-                  const bdfContent = await zipEntry.async("text")
+                  // Read the TTF file content as base64
+                  const ttfContent = await zipEntry.async("base64")
+                  const dataUrl = `data:font/ttf;base64,${ttfContent}`
 
-                  // Create the font with the original metadata plus data
+                  // Create the font with the new TTF model
                   const font: ScreenmanFont = {
                     id: fontData.id,
                     name: fontData.name,
-                    displayName: fontData.displayName,
-                    path: fontData.path,
                     size: fontData.size,
-                    xlfd: fontData.xlfd,
-                    data: bdfContent, // Add data back for runtime use
+                    url: dataUrl,
+                    baselineOffset: fontData.baselineOffset || fontData.size * 0.8, // Fallback if not present
                   }
 
                   loadedFonts.push(font)
-                  console.log("[v0] Loaded font:", font.displayName || font.name, "with ID:", font.id)
+                  console.log("[v0] Loaded font:", font.name, "with ID:", font.id)
                 } else {
                   console.warn("[v0] Font file not found in zip:", fileName)
                 }

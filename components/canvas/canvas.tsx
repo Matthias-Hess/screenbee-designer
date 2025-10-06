@@ -14,7 +14,7 @@ import type {
 } from "../screenman-editor"
 // SnapResult type is defined inline below
 import { processPlaceholders, createPlaceholderContext } from "@/lib/placeholder-utils"
-import { BDFFont } from "@/lib/bdffont" // Added BDFFont import
+// TTF fonts are loaded at runtime using the FontFace API
 
 export interface CanvasProps {
   screen: ScreenmanScreen
@@ -48,17 +48,11 @@ export interface CanvasProps {
   screenWidth: number
   screenHeight: number
   adornment?: string
-  adornmentDrawingArea?: {
-    x: number
-    y: number
-    width: number
-    height: number
-    svgViewBox: { x: number; y: number; width: number; height: number }
-  }
+  adornmentDrawingArea?: { x: number; y: number; width: number; height: number; svgViewBox: { x: number; y: number; width: number; height: number } }
 }
 
 type InteractionMode = "select" | "drag" | "resize" | "create" | "line-endpoint" | "selection-rectangle"
-type ResizeHandle = "nw" | "ne" | "sw" | "se"
+type ResizeHandle = "nw" | "ne" | "sw" | "se" | "baseline-left" | "baseline-right"
 type LineHandle = "start" | "end"
 
 interface SnapResult {
@@ -170,7 +164,7 @@ export function Canvas({
   const [adornmentSvgDoc, setAdornmentSvgDoc] = useState<Document | null>(null)
   const iconImageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map())
   const adornmentImageRef = useRef<HTMLImageElement | null>(null)
-  const bdfFontCacheRef = useRef<Map<string, BDFFont>>(new Map()) // Added BDF font cache
+  const ttfFontLoadMapRef = useRef<Map<string, Promise<void>>>(new Map())
 
 
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null)
@@ -178,116 +172,43 @@ export function Canvas({
   const SNAP_TOLERANCE = 4
 
   // Function to detect which SVG button is under the mouse cursor
-  const detectSvgButtonAtPoint = useCallback(
-    (mouseX: number, mouseY: number): string | null => {
-      console.log("[v0] detectSvgButtonAtPoint called", {
-        mouseX,
-        mouseY,
-        hasAdornmentSvgDoc: !!adornmentSvgDoc,
-        hasAdornmentDrawingArea: !!adornmentDrawingArea,
-      })
+  const detectSvgButtonAt = useCallback(
+    (x: number, y: number): string | null => {
+      if (!adornmentSvgDoc || !adornmentDrawingArea) return null
 
-      if (!adornmentSvgDoc || !adornmentDrawingArea) {
-        console.log("[v0] Early return: missing adornmentSvgDoc or adornmentDrawingArea")
-        return null
-      }
+      // Transform canvas coordinates to SVG coordinates
+      const { x: screenElementX, y: screenElementY, width: screenElementWidth, height: screenElementHeight } = adornmentDrawingArea
+      
+      // Scale factor to map screen element dimensions to project screen dimensions
+      const scaleX = screenElementWidth / screenWidth
+      const scaleY = screenElementHeight / screenHeight
+      
+      // Transform coordinates
+      const svgX = (x + screenElementX * scaleX) / scaleX
+      const svgY = (y + screenElementY * scaleY) / scaleY
 
-      // Transform mouse coordinates to SVG coordinates
-      const {
-        x: screenElementX,
-        y: screenElementY,
-        width: screenElementWidth,
-        height: screenElementHeight,
-      } = adornmentDrawingArea
-      const scaleX = screenWidth / screenElementWidth
-      const scaleY = screenHeight / screenElementHeight
-      const offsetX = -screenElementX * scaleX
-      const offsetY = -screenElementY * scaleY
-
-      // Convert canvas coordinates to SVG coordinates
-      const svgX = (mouseX - offsetX) / scaleX
-      const svgY = (mouseY - offsetY) / scaleY
-
-      console.log("[v0] Transformed coordinates", {
-        canvas: { x: mouseX, y: mouseY },
-        svg: { x: svgX, y: svgY },
-        scale: { scaleX, scaleY },
-        offset: { offsetX, offsetY },
-      })
-
-      // Check all button elements to see if the point is inside
-      // For now, we only support rectangle buttons
-      const buttonElements = adornmentSvgDoc.querySelectorAll('rect[id^="button"]')
-      console.log("[v0] Found button elements:", buttonElements.length)
-
+      // Find button elements in the SVG
+      const buttonElements = adornmentSvgDoc.querySelectorAll('[id^="button"]')
+      
       for (const element of buttonElements) {
-        const id = element.getAttribute("id")
-        if (!id || !id.startsWith("button")) continue
+        const id = element.getAttribute('id')
+        if (!id) continue
 
-        // Only handle rectangle elements
-        if (element.tagName.toLowerCase() !== "rect") continue
-
-        let isInside = false
-
-        // Get basic rectangle properties
-        const x = Number.parseFloat(element.getAttribute("x") || "0")
-        const y = Number.parseFloat(element.getAttribute("y") || "0")
-        const width = Number.parseFloat(element.getAttribute("width") || "0")
-        const height = Number.parseFloat(element.getAttribute("height") || "0")
-
-        console.log("[v0] Checking button", { id, rect: { x, y, width, height } })
-
-        // Handle transforms - for now, we'll handle simple scale transforms
-        const transform = element.getAttribute("transform")
-        let testX = svgX
-        let testY = svgY
-
-        if (transform) {
-          console.log("[v0] Button has transform:", transform)
-          // Parse transform="scale(-1,1)" or similar
-          const scaleMatch = transform.match(/scale$$([^,]+),\s*([^)]+)$$/)
-          if (scaleMatch) {
-            const scaleX = Number.parseFloat(scaleMatch[1])
-            const scaleY = Number.parseFloat(scaleMatch[2])
-
-            // Apply inverse scale to test coordinates
-            testX = svgX / Math.abs(scaleX)
-            testY = svgY / Math.abs(scaleY)
-
-            // Handle negative scales by adjusting coordinates
-            if (scaleX < 0) {
-              testX = -testX
-            }
-            if (scaleY < 0) {
-              testY = -testY
-            }
-
-            console.log("[v0] Applied transform", { original: { svgX, svgY }, transformed: { testX, testY } })
-          }
-        }
-
-        // Check if point is inside the rectangle
-        isInside = testX >= x && testX <= x + width && testY >= y && testY <= y + height
-
-        console.log("[v0] Hit test result", {
-          id,
-          isInside,
-          testPoint: { testX, testY },
-          bounds: { x, y, x2: x + width, y2: y + height },
-        })
-
-        if (isInside) {
-          console.log("[v0] Found hovered button:", id)
+        // Simple bounding box check for now
+        const bbox = element.getBBox?.() || { x: 0, y: 0, width: 0, height: 0 }
+        
+        if (svgX >= bbox.x && svgX <= bbox.x + bbox.width && 
+            svgY >= bbox.y && svgY <= bbox.y + bbox.height) {
           return id
         }
       }
-
-      console.log("[v0] No button found at point")
+      
       return null
     },
-    [adornmentSvgDoc, adornmentDrawingArea, screenWidth, screenHeight],
+    [adornmentSvgDoc, adornmentDrawingArea, screenWidth, screenHeight]
   )
 
+  // Draw function to be used in multiple useEffects and event handlers
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -341,12 +262,12 @@ export function Canvas({
 
       if (guide.type === "vertical") {
         // Position at exact pixel boundary for crisp lines
-        const x = Math.floor(guide.position) + 0.5
+        const x = Math.round(guide.position)
         ctx.moveTo(x, 0)
         ctx.lineTo(x, screenHeight)
       } else {
         // Position at exact pixel boundary for crisp lines
-        const y = Math.floor(guide.position) + 0.5
+        const y = Math.round(guide.position)
         ctx.moveTo(0, y)
         ctx.lineTo(screenWidth, y)
       }
@@ -361,12 +282,12 @@ export function Canvas({
 
       if (line.type === "vertical") {
         // Position at exact pixel boundary for crisp lines
-        const x = Math.floor(line.position) + 0.5
+        const x = Math.round(line.position)
         ctx.moveTo(x, 0)
         ctx.lineTo(x, screenHeight)
       } else {
         // Position at exact pixel boundary for crisp lines
-        const y = Math.floor(line.position) + 0.5
+        const y = Math.round(line.position)
         ctx.moveTo(0, y)
         ctx.lineTo(screenWidth, y)
       }
@@ -479,7 +400,18 @@ export function Canvas({
       ctx.strokeStyle = "#3b82f6" // Blue border
       ctx.lineWidth = 1 / zoom
       ctx.setLineDash([4 / zoom, 4 / zoom]) // Dashed line
-      ctx.strokeRect(x, y, width, height)
+      // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+      const crispX = Math.round(x)
+      const crispY = Math.round(y)
+      const crispWidth = Math.round(width)
+      const crispHeight = Math.round(height)
+      ctx.beginPath()
+      ctx.moveTo(crispX, crispY)
+      ctx.lineTo(crispX + crispWidth, crispY)
+      ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+      ctx.lineTo(crispX, crispY + crispHeight)
+      ctx.lineTo(crispX, crispY)
+      ctx.stroke()
       ctx.setLineDash([]) // Reset line dash
     }
 
@@ -517,7 +449,18 @@ export function Canvas({
 
             ctx.strokeStyle = "#cccccc" // Default field border
             ctx.lineWidth = 1
-            ctx.strokeRect(x, y, width, height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const crispX = Math.round(x)
+            const crispY = Math.round(y)
+            const crispWidth = Math.round(width)
+            const crispHeight = Math.round(height)
+            ctx.beginPath()
+            ctx.moveTo(crispX, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY)
+            ctx.stroke()
 
             // No text preview needed - field will be empty until user selects a topic
           } else if (dragState.creatingType === "MQTTIconField") {
@@ -527,7 +470,18 @@ export function Canvas({
 
             ctx.strokeStyle = "#cccccc" // Default field border
             ctx.lineWidth = 1
-            ctx.strokeRect(x, y, width, height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const crispX = Math.round(x)
+            const crispY = Math.round(y)
+            const crispWidth = Math.round(width)
+            const crispHeight = Math.round(height)
+            ctx.beginPath()
+            ctx.moveTo(crispX, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY)
+            ctx.stroke()
 
             // Add placeholder text preview
             ctx.fillStyle = "#000000"
@@ -543,7 +497,18 @@ export function Canvas({
 
             ctx.strokeStyle = "#000000" // Default box stroke
             ctx.lineWidth = 1 / zoom
-            ctx.strokeRect(x, y, width, height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const crispX = Math.round(x)
+            const crispY = Math.round(y)
+            const crispWidth = Math.round(width)
+            const crispHeight = Math.round(height)
+            ctx.beginPath()
+            ctx.moveTo(crispX, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY)
+            ctx.stroke()
           } else if (dragState.creatingType === "label") {
             // Draw label preview with final appearance
             ctx.fillStyle = "#ffffff" // White background like field
@@ -551,7 +516,18 @@ export function Canvas({
 
             ctx.strokeStyle = "#cccccc" // Light gray border like field
             ctx.lineWidth = 1 / zoom
-            ctx.strokeRect(x, y, width, height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const crispX = Math.round(x)
+            const crispY = Math.round(y)
+            const crispWidth = Math.round(width)
+            const crispHeight = Math.round(height)
+            ctx.beginPath()
+            ctx.moveTo(crispX, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY)
+            ctx.stroke()
 
             ctx.fillStyle = "#000000"
             ctx.font = `14px Arial`
@@ -582,7 +558,18 @@ export function Canvas({
             ctx.fillRect(x, y, width, height)
             ctx.strokeStyle = "#cccccc" // Default border
             ctx.lineWidth = 1 / zoom
-            ctx.strokeRect(x, y, width, height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const crispX = Math.round(x)
+            const crispY = Math.round(y)
+            const crispWidth = Math.round(width)
+            const crispHeight = Math.round(height)
+            ctx.beginPath()
+            ctx.moveTo(crispX, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY)
+            ctx.lineTo(crispX + crispWidth, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY + crispHeight)
+            ctx.lineTo(crispX, crispY)
+            ctx.stroke()
 
             // Placeholder text
             ctx.fillStyle = "#000000"
@@ -592,6 +579,68 @@ export function Canvas({
             ctx.fillText("50%", x + width / 2, y + height / 2)
           }
         }
+      }
+    }
+
+    // Draw adornment if present (after the drawing area)
+    if (adornmentImageRef.current && adornmentDrawingArea) {
+      ctx.save()
+      try {
+        // Calculate transform to align the screen element with the project's drawing area bounds
+        const { x: screenElementX, y: screenElementY, width: screenElementWidth, height: screenElementHeight } = adornmentDrawingArea
+        
+        // Scale factor to map screen element dimensions to project screen dimensions
+        const scaleX = screenWidth / screenElementWidth
+        const scaleY = screenHeight / screenElementHeight
+        
+        // Calculate the offset to position the screen element at the project origin (0,0)
+        // We need to translate the SVG so that the screen element's top-left corner is at (0,0)
+        const offsetX = -screenElementX * scaleX
+        const offsetY = -screenElementY * scaleY
+        
+        // Apply the transform
+        ctx.translate(offsetX, offsetY)
+        ctx.scale(scaleX, scaleY)
+        
+        // Draw the entire SVG (it will be scaled and positioned so that screen element aligns with project bounds)
+        ctx.drawImage(adornmentImageRef.current, 0, 0)
+        
+        // Draw hover effect for SVG buttons
+        if (hoveredSvgButtonId && adornmentSvgDoc) {
+          const buttonElement = adornmentSvgDoc.getElementById(hoveredSvgButtonId)
+          if (buttonElement) {
+            // Create a light blue overlay for the hovered button
+            ctx.save()
+            ctx.globalAlpha = 0.3
+            ctx.fillStyle = '#87CEEB' // Light blue
+            
+            // Draw overlay based on element type and attributes
+            // Note: The context is already transformed to SVG coordinates, so we can use raw SVG coordinates
+            const tagName = buttonElement.tagName.toLowerCase()
+            const x = parseFloat(buttonElement.getAttribute('x') || '0')
+            const y = parseFloat(buttonElement.getAttribute('y') || '0')
+            const width = parseFloat(buttonElement.getAttribute('width') || '0')
+            const height = parseFloat(buttonElement.getAttribute('height') || '0')
+            
+            if (tagName === 'rect' && width > 0 && height > 0) {
+              ctx.fillRect(x, y, width, height)
+            } else if (tagName === 'circle') {
+              const cx = parseFloat(buttonElement.getAttribute('cx') || '0')
+              const cy = parseFloat(buttonElement.getAttribute('cy') || '0')
+              const r = parseFloat(buttonElement.getAttribute('r') || '0')
+              ctx.beginPath()
+              ctx.arc(cx, cy, r, 0, 2 * Math.PI)
+              ctx.fill()
+            }
+            
+            ctx.restore()
+          }
+        }
+        
+        ctx.restore()
+      } catch (error) {
+        console.error("Error rendering adornment:", error)
+        ctx.restore()
       }
     }
 
@@ -714,11 +763,60 @@ export function Canvas({
   // </CHANGE>
 
   useEffect(() => {
+    if (adornment) {
+      const img = new Image()
+      img.crossOrigin = "anonymous"
+      img.onload = () => {
+        adornmentImageRef.current = img
+        draw()
+      }
+      img.onerror = () => {
+        console.error("Failed to load adornment image")
+        adornmentImageRef.current = null
+      }
+      
+      // Set the SVG as source
+      let svgData = adornment
+      if (adornment.startsWith("data:image/svg+xml;base64,")) {
+        svgData = adornment
+      } else if (adornment.startsWith("data:image/svg+xml,")) {
+        svgData = adornment
+      } else {
+        svgData = `data:image/svg+xml;base64,${btoa(adornment)}`
+      }
+      
+      img.src = svgData
+      
+      // Parse SVG for interaction detection
+      try {
+        let svgText = svgData
+        if (svgData.startsWith("data:image/svg+xml;base64,")) {
+          svgText = atob(svgData.replace("data:image/svg+xml;base64,", ""))
+        } else if (svgData.startsWith("data:image/svg+xml,")) {
+          svgText = decodeURIComponent(svgData.replace("data:image/svg+xml,", ""))
+        }
+        
+        const parser = new DOMParser()
+        const doc = parser.parseFromString(svgText, "image/svg+xml")
+        setAdornmentSvgDoc(doc)
+      } catch (error) {
+        console.error("Failed to parse adornment SVG for interaction:", error)
+        setAdornmentSvgDoc(null)
+      }
+    } else {
+      adornmentImageRef.current = null
+      setAdornmentSvgDoc(null)
+      draw()
+    }
+  }, [adornment, draw])
+
+  useEffect(() => {
     draw()
   }, [
     screen.objects,
     selectedObjectIds,
     hoveredObjectId,
+    hoveredSvgButtonId,
     zoom,
     offset,
     dragState,
@@ -794,12 +892,57 @@ export function Canvas({
       obj: { x: number; y: number; width: number; height: number },
       otherObjects: ScreenmanObject[],
       isResize = false,
+      objectType?: string,
+      draggedObject?: ScreenmanObject, // Add the actual object for baseline calculation
     ): SnapResult => {
       let snapX = obj.x
       let snapY = obj.y
       const snapWidth = obj.width
       const snapHeight = obj.height
       const snapLines: { type: "vertical" | "horizontal"; position: number }[] = []
+
+      // For text objects (label, MqttDataField), snap baseline handles to grid lines
+      if (objectType === "label" || objectType === "MqttDataField" && draggedObject) {
+        // Calculate the actual baseline Y position for the potential new position
+        const tempObj = {
+          ...draggedObject,
+          x: obj.x,
+          y: obj.y,
+          width: obj.width,
+          height: obj.height,
+        }
+        const actualBaselineY = getBaselineY(tempObj)
+        
+        snapGuides.forEach((guide) => {
+          if (guide.type === "vertical") {
+            // Snap left baseline handle (left edge)
+            if (Math.abs(obj.x - guide.position) <= SNAP_TOLERANCE / zoom) {
+              snapX = Math.round(guide.position)
+              snapLines.push({ type: "vertical", position: guide.position })
+            }
+            // Snap right baseline handle (right edge)
+            else if (Math.abs(obj.x + obj.width - guide.position) <= SNAP_TOLERANCE / zoom) {
+              snapX = Math.round(guide.position - obj.width)
+              snapLines.push({ type: "vertical", position: guide.position })
+            }
+          } else {
+            // Snap baseline to horizontal guide lines using actual baseline
+            if (Math.abs(actualBaselineY - guide.position) <= SNAP_TOLERANCE / zoom) {
+              const baselineOffset = actualBaselineY - obj.y // How far baseline is from object top
+              snapY = Math.round(guide.position - baselineOffset)
+              snapLines.push({ type: "horizontal", position: guide.position })
+            }
+          }
+        })
+        
+        return {
+          x: snapX,
+          y: snapY,
+          width: snapWidth,
+          height: snapHeight,
+          snapLines,
+        }
+      }
 
       snapGuides.forEach((guide) => {
         if (guide.type === "vertical") {
@@ -845,7 +988,7 @@ export function Canvas({
         snapLines,
       }
     },
-    [SNAP_TOLERANCE, snapGuides],
+    [SNAP_TOLERANCE, snapGuides, zoom],
   )
 
   const formatFieldValue = (value: string, properties: Record<string, any>): string => {
@@ -958,7 +1101,18 @@ export function Canvas({
             drawRoundedRect(ctx, obj.x, obj.y, obj.width, obj.height, obj.properties.cornerRadius)
             ctx.stroke()
           } else {
-            ctx.strokeRect(obj.x, obj.y, obj.width, obj.height)
+            // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+            const x = Math.round(obj.x)
+            const y = Math.round(obj.y)
+            const width = Math.round(obj.width)
+            const height = Math.round(obj.height)
+            ctx.beginPath()
+            ctx.moveTo(x, y)
+            ctx.lineTo(x + width, y)
+            ctx.lineTo(x + width, y + height)
+            ctx.lineTo(x, y + height)
+            ctx.lineTo(x, y)
+            ctx.stroke()
           }
         }
         break
@@ -973,87 +1127,92 @@ export function Canvas({
         const labelBorderColor = obj.properties.borderColor || "#cccccc"
         if (labelBorderColor !== "transparent") {
           ctx.strokeStyle = labelBorderColor
-          ctx.lineWidth = 1 / zoom
-          ctx.strokeRect(obj.x, obj.y, obj.width, obj.height)
+          ctx.lineWidth = 1
+          // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+          const x = Math.round(obj.x)
+          const y = Math.round(obj.y)
+          const width = Math.round(obj.width)
+          const height = Math.round(obj.height)
+          ctx.beginPath()
+          ctx.moveTo(x, y)
+          ctx.lineTo(x + width, y)
+          ctx.lineTo(x + width, y + height)
+          ctx.lineTo(x, y + height)
+          ctx.lineTo(x, y)
+          ctx.stroke()
         }
 
         const rawText = obj.properties.text || "Label"
         const text = placeholderContext ? processPlaceholders(rawText, placeholderContext) : rawText
         const lines = text.split("\n")
 
-        // Check if label has a fontId and try to use BDF font
+        // Resolve font by fontId from project fonts (TTF)
         const fontId = obj.properties.fontId
-        let bdfFont: BDFFont | null = null
-
-        if (fontId) {
-          // Try to get from cache first
-          bdfFont = bdfFontCacheRef.current.get(fontId) || null
-
-          // If not in cache, try to parse and cache it
-          if (!bdfFont) {
-            const font = fonts.find((f) => f.id === fontId)
-            if (font && font.data) {
-              try {
-                bdfFont = new BDFFont(font.data)
-                bdfFontCacheRef.current.set(fontId, bdfFont)
-              } catch (error) {
-                console.error("[v0] Failed to parse BDF font:", error)
-                bdfFont = null
-              }
-            }
-          }
-        }
+        const fontMeta = fonts?.find((f) => f.id === fontId)
 
         ctx.fillStyle = obj.properties.color || "#000000"
 
-        if (bdfFont) {
-          // Use BDF font rendering
-          const fontHeight = bdfFont.FONTBOUNDINGBOX?.h || 16
-          const lineHeight = fontHeight * 1.2
+        const requestedSize = fontMeta?.size || obj.properties.fontSize || 14
+        const familyName = fontMeta?.name || obj.properties.fontFamily || "sans-serif"
+        const fontWeight = obj.properties.fontWeight || "normal"
 
-          lines.forEach((line, index) => {
-            // Calculate text width for alignment
-            const textMetrics = bdfFont!.measureText(line)
-            let textX = obj.x
+        // Ensure TTF font is loaded if URL is provided
+        if (fontMeta?.url && !ttfFontLoadMapRef.current.has(fontMeta.id)) {
+          const loadPromise = (async () => {
+            try {
+              const ff = new FontFace(familyName, `url(${fontMeta.url})`)
+              await ff.load()
+              ;(document as any).fonts.add(ff)
+            } catch {}
+          })()
+          ttfFontLoadMapRef.current.set(fontMeta.id, loadPromise)
+        }
 
-            // Handle text alignment
-            const textAlign = obj.properties.textAlign || "left"
-            if (textAlign === "center") {
-              textX = obj.x + (obj.width - textMetrics.width) / 2
-            } else if (textAlign === "right") {
-              textX = obj.x + obj.width - textMetrics.width
-            }
+        ctx.font = `${fontWeight} ${requestedSize}px ${familyName}`
+        ctx.textBaseline = "alphabetic"
+        // Use getBaselineY function for consistent baseline calculation with stored font metadata
+        const baselineForHandles = getBaselineY(obj)
+        let currentBaselineY = baselineForHandles
+        for (const line of lines) {
+          const m = ctx.measureText(line || "Hg")
+          const ascent = (m as any).actualBoundingBoxAscent || requestedSize * 0.8
+          const descent = (m as any).actualBoundingBoxDescent || requestedSize * 0.2
+          const lineHeight = ascent + descent
+          const alignedX =
+            (obj.properties.textAlign || "left") === "center"
+              ? obj.x + obj.width / 2 - m.width / 2
+              : (obj.properties.textAlign || "left") === "right"
+              ? obj.x + obj.width - m.width
+              : obj.x + 2
+          // Draw baseline guide - ensure crisp pixel alignment at 100% zoom
+          ctx.save()
+          ctx.strokeStyle = "rgba(220, 38, 38, 0.35)" // red-500 @ 35%
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          const crispBaselineY = Math.round(currentBaselineY)
+          ctx.moveTo(obj.x, crispBaselineY)
+          ctx.lineTo(obj.x + obj.width, crispBaselineY)
+          ctx.stroke()
+          ctx.restore()
 
-            // Get font ascent from BDF font properties
-            const fontAscent = bdfFont!.properties["FONT_ASCENT"] || bdfFont!.properties["ASCENT"] || 14
+          ctx.fillText(line, alignedX, currentBaselineY)
+          currentBaselineY += lineHeight
+        }
 
-            const baselineY = obj.y + fontAscent + index * lineHeight
-
-            // Draw the text using BDF font
-            bdfFont!.drawText(ctx, line, textX, baselineY)
-          })
-        } else {
-          // Fall back to standard font rendering
-          ctx.font = `${obj.properties.fontWeight || "normal"} ${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
-          ctx.textAlign = (obj.properties.textAlign || "left") as CanvasTextAlign
-          ctx.textBaseline = "top"
-
-          const lineHeight = (obj.properties.fontSize || 14) * 1.2
-
-          const metrics = ctx.measureText("M")
-          const fontSize = obj.properties.fontSize || 14
-          const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.8 // Fallback to ~80% of font size
-
-          let textX = obj.x // No padding for left alignment
-          if (obj.properties.textAlign === "center") {
-            textX = obj.x + obj.width / 2
-          } else if (obj.properties.textAlign === "right") {
-            textX = obj.x + obj.width // No padding for right alignment
-          }
-
-          lines.forEach((line, index) => {
-            ctx.fillText(line, textX, obj.y + index * lineHeight)
-          })
+        // Draw baseline handles at rectangle edges when selected
+        if (isSelected) {
+          const handleSize = 8 / zoom
+          const half = handleSize / 2
+          ctx.save()
+          ctx.fillStyle = "#3b82f6"
+          ctx.strokeStyle = "#1d4ed8"
+          ctx.lineWidth = 1 / zoom
+          const crispBaselineForHandles = Math.round(baselineForHandles)
+          ctx.fillRect(obj.x - half, crispBaselineForHandles - half, handleSize, handleSize)
+          ctx.strokeRect(obj.x - half, crispBaselineForHandles - half, handleSize, handleSize)
+          ctx.fillRect(obj.x + obj.width - half, crispBaselineForHandles - half, handleSize, handleSize)
+          ctx.strokeRect(obj.x + obj.width - half, crispBaselineForHandles - half, handleSize, handleSize)
+          ctx.restore()
         }
         break
 
@@ -1070,34 +1229,25 @@ export function Canvas({
         if (fieldBorderColor !== "transparent") {
           ctx.strokeStyle = fieldBorderColor
           ctx.lineWidth = 1
-          ctx.strokeRect(obj.x, obj.y, obj.width, obj.height)
+          // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+          const x = Math.round(obj.x)
+          const y = Math.round(obj.y)
+          const width = Math.round(obj.width)
+          const height = Math.round(obj.height)
+          ctx.beginPath()
+          ctx.moveTo(x, y)
+          ctx.lineTo(x + width, y)
+          ctx.lineTo(x + width, y + height)
+          ctx.lineTo(x, y + height)
+          ctx.lineTo(x, y)
+          ctx.stroke()
         }
 
         const displayAs = obj.properties.displayAs || "Display as-is"
         const rawFieldValue =
           getPreviewValueFromTopic(obj.properties.topic) || obj.properties.topic || "No topic selected"
 
-        const mqttFontId = obj.properties.fontId
-        let mqttBdfFont: BDFFont | null = null
-
-        if (mqttFontId) {
-          // Try to get from cache first
-          mqttBdfFont = bdfFontCacheRef.current.get(mqttFontId) || null
-
-          // If not in cache, try to parse and cache it
-          if (!mqttBdfFont) {
-            const mqttFont = fonts.find((f) => f.id === mqttFontId)
-            if (mqttFont && mqttFont.data) {
-              try {
-                mqttBdfFont = new BDFFont(mqttFont.data)
-                bdfFontCacheRef.current.set(mqttFontId, mqttBdfFont)
-              } catch (error) {
-                console.error("[v0] Failed to parse BDF font for MQTT field:", error)
-                mqttBdfFont = null
-              }
-            }
-          }
-        }
+        const mqttFontMeta = fonts?.find((f) => f.id === obj.properties.fontId)
 
         // Handle icon-based display modes
         if (obj.type === "MQTTIconField" || displayAs === "Display as Icon" || displayAs === "Show Range Icon") {
@@ -1191,39 +1341,27 @@ export function Canvas({
                   const iconY = obj.y + (obj.height - iconSize) / 2
                   ctx.drawImage(img, iconX, iconY, iconSize, iconSize)
                 } catch (error) {
+                  // fallback to text
                   if (obj.type !== "MQTTIconField") {
-                    if (mqttBdfFont) {
                       ctx.fillStyle = obj.properties.textColor || "#000000"
-                      const textMetrics = mqttBdfFont.measureText(rawFieldValue)
-                      const fontAscent = mqttBdfFont.properties["FONT_ASCENT"] || mqttBdfFont.properties["ASCENT"] || 14
-                      const textX = obj.x + (obj.width - textMetrics.width) / 2
-                      const baselineY = obj.y + fontAscent
-                      mqttBdfFont.drawText(ctx, rawFieldValue, textX, baselineY)
-                    } else {
-                      ctx.fillStyle = obj.properties.textColor || "#000000"
-                      ctx.font = `${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
+                    const size = mqttFontMeta?.size || obj.properties.fontSize || 14
+                    const fam = mqttFontMeta?.name || obj.properties.fontFamily || "sans-serif"
+                    ctx.font = `${size}px ${fam}`
                       ctx.textAlign = "center"
                       ctx.textBaseline = "middle"
                       ctx.fillText(rawFieldValue, obj.x + obj.width / 2, obj.y + obj.height / 2)
-                    }
                   }
                 }
               } else {
+                // show text while icon not ready
                 if (obj.type !== "MQTTIconField") {
-                  if (mqttBdfFont) {
                     ctx.fillStyle = obj.properties.textColor || "#000000"
-                    const textMetrics = mqttBdfFont.measureText(rawFieldValue)
-                    const fontAscent = mqttBdfFont.properties["FONT_ASCENT"] || mqttBdfFont.properties["ASCENT"] || 14
-                    const textX = obj.x + (obj.width - textMetrics.width) / 2
-                    const baselineY = obj.y + fontAscent
-                    mqttBdfFont.drawText(ctx, rawFieldValue, textX, baselineY)
-                  } else {
-                    ctx.fillStyle = obj.properties.textColor || "#000000"
-                    ctx.font = `${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
+                  const size = mqttFontMeta?.size || obj.properties.fontSize || 14
+                  const fam = mqttFontMeta?.name || obj.properties.fontFamily || "sans-serif"
+                  ctx.font = `${size}px ${fam}`
                     ctx.textAlign = "center"
                     ctx.textBaseline = "middle"
                     ctx.fillText(rawFieldValue, obj.x + obj.width / 2, obj.y + obj.height / 2)
-                  }
                 }
               }
             } else {
@@ -1231,20 +1369,13 @@ export function Canvas({
                 // No matching rule found - render nothing (field stays empty)
               } else {
                 // Display as-is or no matching icon
-                if (mqttBdfFont) {
                   ctx.fillStyle = obj.properties.textColor || "#000000"
-                  const textMetrics = mqttBdfFont.measureText(rawFieldValue)
-                  const fontAscent = mqttBdfFont.properties["FONT_ASCENT"] || mqttBdfFont.properties["ASCENT"] || 14
-                  const textX = obj.x + (obj.width - textMetrics.width) / 2
-                  const baselineY = obj.y + fontAscent
-                  mqttBdfFont.drawText(ctx, rawFieldValue, textX, baselineY)
-                } else {
-                  ctx.fillStyle = obj.properties.textColor || "#000000"
-                  ctx.font = `${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
+                const size = mqttFontMeta?.size || obj.properties.fontSize || 14
+                const fam = mqttFontMeta?.name || obj.properties.fontFamily || "sans-serif"
+                ctx.font = `${size}px ${fam}`
                   ctx.textAlign = "center"
                   ctx.textBaseline = "middle"
                   ctx.fillText(rawFieldValue, obj.x + obj.width / 2, obj.y + obj.height / 2)
-                }
               }
             }
           }
@@ -1252,27 +1383,12 @@ export function Canvas({
           // Text-based display modes (Display as-is, Formatted Number)
           const formattedFieldValue = formatFieldValue(rawFieldValue, obj.properties)
 
-          if (mqttBdfFont) {
             ctx.fillStyle = obj.properties.textColor || "#000000"
-            const textMetrics = mqttBdfFont.measureText(formattedFieldValue)
-            const fontAscent = mqttBdfFont.properties["FONT_ASCENT"] || mqttBdfFont.properties["ASCENT"] || 14
-
-            let fieldTextX = obj.x
-            const textAlign = obj.properties.textAlign || "left"
-            if (textAlign === "center") {
-              fieldTextX = obj.x + (obj.width - textMetrics.width) / 2
-            } else if (textAlign === "right") {
-              fieldTextX = obj.x + obj.width - textMetrics.width
-            }
-
-            const baselineY = obj.y + fontAscent
-            mqttBdfFont.drawText(ctx, formattedFieldValue, fieldTextX, baselineY)
-          } else {
-            // Fallback to standard font rendering
-            ctx.fillStyle = obj.properties.textColor || "#000000"
-            ctx.font = `${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
+          const size = mqttFontMeta?.size || obj.properties.fontSize || 14
+          const fam = mqttFontMeta?.name || obj.properties.fontFamily || "sans-serif"
+          ctx.font = `${size}px ${fam}`
             ctx.textAlign = (obj.properties.textAlign || "left") as CanvasTextAlign
-            ctx.textBaseline = "middle"
+          ctx.textBaseline = "alphabetic"
 
             let fieldTextX = obj.x + 8 // Default left alignment with padding
             if (obj.properties.textAlign === "center") {
@@ -1281,7 +1397,34 @@ export function Canvas({
               fieldTextX = obj.x + obj.width - 8 // Right alignment with padding
             }
 
-            ctx.fillText(formattedFieldValue, fieldTextX, obj.y + obj.height / 2)
+          // Use getBaselineY function for consistent baseline calculation with stored font metadata
+          const baselineY = getBaselineY(obj)
+          // Draw baseline guide - ensure crisp pixel alignment at 100% zoom
+          ctx.save()
+          ctx.strokeStyle = "rgba(220, 38, 38, 0.35)"
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          const crispBaselineY = Math.round(baselineY)
+          ctx.moveTo(obj.x, crispBaselineY)
+          ctx.lineTo(obj.x + obj.width, crispBaselineY)
+          ctx.stroke()
+          ctx.restore()
+          ctx.fillText(formattedFieldValue, fieldTextX, baselineY)
+
+          // Draw baseline handles at rectangle edges when selected
+          if (isSelected) {
+            const handleSize = 8 / zoom
+            const half = handleSize / 2
+            ctx.save()
+            ctx.fillStyle = "#3b82f6"
+            ctx.strokeStyle = "#1d4ed8"
+            ctx.lineWidth = 1 / zoom
+            const crispBaselineY = Math.round(baselineY)
+            ctx.fillRect(obj.x - half, crispBaselineY - half, handleSize, handleSize)
+            ctx.strokeRect(obj.x - half, crispBaselineY - half, handleSize, handleSize)
+            ctx.fillRect(obj.x + obj.width - half, crispBaselineY - half, handleSize, handleSize)
+            ctx.strokeRect(obj.x + obj.width - half, crispBaselineY - half, handleSize, handleSize)
+            ctx.restore()
           }
         }
         break
@@ -1369,8 +1512,19 @@ export function Canvas({
         const levelBorderColor = obj.properties.borderColor || "#cccccc"
         if (levelBorderColor !== "transparent") {
           ctx.strokeStyle = levelBorderColor
-          ctx.lineWidth = 1 / zoom
-          ctx.strokeRect(obj.x, obj.y, obj.width, obj.height)
+          ctx.lineWidth = 1
+          // Draw crisp 1-pixel rectangle border exactly on pixel boundaries
+          const x = Math.round(obj.x)
+          const y = Math.round(obj.y)
+          const width = Math.round(obj.width)
+          const height = Math.round(obj.height)
+          ctx.beginPath()
+          ctx.moveTo(x, y)
+          ctx.lineTo(x + width, y)
+          ctx.lineTo(x + width, y + height)
+          ctx.lineTo(x, y + height)
+          ctx.lineTo(x, y)
+          ctx.stroke()
         }
 
         // Get current value from topic
@@ -1417,27 +1571,7 @@ export function Canvas({
         }
 
         // Draw the value text
-        const levelFontId = obj.properties.fontId
-        let levelBdfFont: BDFFont | null = null
-
-        if (levelFontId) {
-          // Try to get from cache first
-          levelBdfFont = bdfFontCacheRef.current.get(levelFontId) || null
-
-          // If not in cache, try to parse and cache it
-          if (!levelBdfFont) {
-            const levelFont = fonts.find((f) => f.id === levelFontId)
-            if (levelFont && levelFont.data) {
-              try {
-                levelBdfFont = new BDFFont(levelFont.data)
-                bdfFontCacheRef.current.set(levelFontId, levelBdfFont)
-              } catch (error) {
-                console.error("[v0] Failed to parse BDF font for level indicator:", error)
-                levelBdfFont = null
-              }
-            }
-          }
-        }
+        const levelFontMeta = fonts?.find((f) => f.id === obj.properties.fontId)
 
         const displayValue = obj.properties.displayValue || "value"
         if (displayValue !== "none") {
@@ -1445,20 +1579,12 @@ export function Canvas({
 
           ctx.fillStyle = obj.properties.textColor || "#000000"
 
-          if (levelBdfFont) {
-            const textMetrics = levelBdfFont.measureText(displayText)
-            const fontAscent = levelBdfFont.properties["FONT_ASCENT"] || levelBdfFont.properties["ASCENT"] || 14
-            const textX = obj.x + (obj.width - textMetrics.width) / 2
-            const baselineY = obj.y + obj.height / 2 + fontAscent / 2
-
-            levelBdfFont.drawText(ctx, displayText, textX, baselineY)
-          } else {
-            // Fallback to canvas text rendering
-            ctx.font = `${obj.properties.fontSize || 14}px ${obj.properties.fontFamily || "Arial"}`
+          const size = levelFontMeta?.size || obj.properties.fontSize || 14
+          const fam = levelFontMeta?.name || obj.properties.fontFamily || "sans-serif"
+          ctx.font = `${size}px ${fam}`
             ctx.textAlign = "center"
             ctx.textBaseline = "middle"
             ctx.fillText(displayText, obj.x + obj.width / 2, obj.y + obj.height / 2)
-          }
         }
 
         break
@@ -1484,8 +1610,19 @@ export function Canvas({
         ctx.setLineDash([]) // Reset line dash
       } else {
         ctx.strokeStyle = "rgb(var(--canvas-selection) / 0.5)"
-        ctx.lineWidth = 1 / zoom
-        ctx.strokeRect(obj.x - 1 / zoom, obj.y - 1 / zoom, obj.width + 2 / zoom, obj.height + 2 / zoom)
+        ctx.lineWidth = 1
+        // Draw crisp 1-pixel selection border exactly on pixel boundaries
+        const x = Math.round(obj.x - 1 / zoom)
+        const y = Math.round(obj.y - 1 / zoom)
+        const width = Math.round(obj.width + 2 / zoom)
+        const height = Math.round(obj.height + 2 / zoom)
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        ctx.lineTo(x + width, y)
+        ctx.lineTo(x + width, y + height)
+        ctx.lineTo(x, y + height)
+        ctx.lineTo(x, y)
+        ctx.stroke()
       }
     }
 
@@ -1502,12 +1639,12 @@ export function Canvas({
           ctx.fillRect(handle.x, handle.y, handleSize, handleSize)
           ctx.strokeRect(handle.x, handle.y, handleSize, handleSize)
         })
-      } else {
+      } else if (obj.type !== "label" && obj.type !== "MqttDataField") {
         const handleSize = 8 / zoom
         const handles = getResizeHandles(obj, handleSize)
 
-        ctx.fillStyle = "#3b82f6" // Blue color for better visibility
-        ctx.strokeStyle = "#ffffff" // White border
+        ctx.fillStyle = "#3b82f6"
+        ctx.strokeStyle = "#ffffff"
         ctx.lineWidth = 1 / zoom
 
         handles.forEach((handle) => {
@@ -1541,12 +1678,54 @@ export function Canvas({
 
   const getResizeHandles = (obj: ScreenmanObject, handleSize: number) => {
     const half = handleSize / 2
-    return [
+    const handles = []
+    
+    // Text objects (label, MqttDataField) only get baseline handles, no corner handles
+    if (obj.type === "label" || obj.type === "MqttDataField") {
+      const baselineY = getBaselineY(obj)
+      handles.push(
+        { x: obj.x - half, y: baselineY - half, handle: "baseline-left" as ResizeHandle },
+        { x: obj.x + obj.width - half, y: baselineY - half, handle: "baseline-right" as ResizeHandle }
+      )
+    } else {
+      // All other objects get corner handles
+      handles.push(
       { x: obj.x - half, y: obj.y - half, handle: "nw" as ResizeHandle },
       { x: obj.x + obj.width - half, y: obj.y - half, handle: "ne" as ResizeHandle },
       { x: obj.x + obj.width - half, y: obj.y + obj.height - half, handle: "se" as ResizeHandle },
-      { x: obj.x - half, y: obj.y + obj.height - half, handle: "sw" as ResizeHandle },
-    ]
+        { x: obj.x - half, y: obj.y + obj.height - half, handle: "sw" as ResizeHandle }
+      )
+    }
+    
+    return handles
+  }
+
+  const getBaselineY = (obj: ScreenmanObject): number => {
+    if (obj.type === "label" || obj.type === "MqttDataField") {
+      const fontMeta = fonts?.find((f) => f.id === obj.properties.fontId)
+      if (fontMeta && fontMeta.baselineOffset !== undefined) {
+        // Use stored baseline offset from font (single source of truth)
+        // Round to integer for crisp pixel alignment at 100% zoom
+        const baselineY = obj.y + fontMeta.baselineOffset
+        console.log(`[Font Metrics] Using stored baselineOffset for ${obj.type} "${obj.id}": ${fontMeta.name} ${fontMeta.size}px -> baselineOffset=${fontMeta.baselineOffset.toFixed(2)}px, object.y=${obj.y}, finalBaseline=${baselineY.toFixed(2)} -> rounded=${Math.round(baselineY)}`)
+        return Math.round(baselineY)
+      }
+      // Fallback for fonts without baselineOffset (legacy or default fonts)
+      const size = fontMeta?.size || obj.properties.fontSize || 14
+      const fontWeight = obj.properties.fontWeight || "normal"
+      const familyName = fontMeta?.name || obj.properties.fontFamily || "Arial"
+      
+      const tempCanvas = document.createElement("canvas")
+      const tempCtx = tempCanvas.getContext("2d")!
+      tempCtx.font = `${fontWeight} ${size}px ${familyName}`
+      const text = obj.type === "label" ? (obj.properties.text || "Hg") : "Hg"
+      const m = tempCtx.measureText(text)
+      const ascent = (m as any).actualBoundingBoxAscent || size * 0.8
+      const baselineY = obj.y + ascent
+      console.log(`[Font Metrics] Calculated fallback baselineOffset for ${obj.type} "${obj.id}": ${familyName} ${size}px -> ascent=${ascent.toFixed(2)}px, object.y=${obj.y}, finalBaseline=${baselineY.toFixed(2)} -> rounded=${Math.round(baselineY)}`)
+      return Math.round(baselineY)
+    }
+    return obj.y
   }
 
   const getLineHandles = (obj: ScreenmanObject, handleSize: number) => {
@@ -1670,22 +1849,10 @@ export function Canvas({
     [zoom, offset, screenWidth, screenHeight, canvasRef],
   )
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
+  const handleMouseDown = (e: React.MouseEvent) => {
       const coords = getCanvasCoordinates(e.clientX, e.clientY)
       const isCtrlOrCmd = e.ctrlKey || e.metaKey
       const isShift = e.shiftKey
-
-      // Check for SVG button click first
-      const clickedSvgButton = detectSvgButtonAtPoint(coords.x, coords.y)
-      if (clickedSvgButton) {
-        // Find the corresponding hardware button
-        const hardwareButton = hardwareButtons.find((button) => button.svgElementId === clickedSvgButton)
-        if (hardwareButton && onHardwareButtonClick) {
-          onHardwareButtonClick(hardwareButton)
-          return
-        }
-      }
 
       if (activeTool === "icon") {
         if (onIconToolClick) {
@@ -1694,10 +1861,7 @@ export function Canvas({
         return
       }
 
-      // Hardware button clicks are now handled via SVG button elements above
-
       if (activeTool !== "select") {
-        // Start creating the object with drag state
         setDragState({
           mode: "create",
           objectId: null,
@@ -1708,7 +1872,7 @@ export function Canvas({
         return
       }
 
-      const clickedObject = findObjectAtPoint(coords.x, coords.y, screen.objects)
+    const clickedObject = findObjectAt(coords.x, coords.y)
 
       if (clickedObject) {
         const isAlreadySelected = selectedObjectIds.includes(clickedObject.id)
@@ -1788,23 +1952,7 @@ export function Canvas({
           })
         }
       }
-    },
-    [
-      activeTool,
-      detectSvgButtonAtPoint,
-      hardwareButtons,
-      onHardwareButtonClick,
-      getCanvasCoordinates,
-      findObjectAtPoint,
-      findLineHandle,
-      findResizeHandle,
-      onSelectObject,
-      screen.objects,
-      selectedObjectIds,
-      setDragState,
-      onIconToolClick,
-    ],
-  )
+  }
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1826,6 +1974,10 @@ export function Canvas({
       if (!dragState) {
         const hoveredObject = findObjectAtPoint(coords.x, coords.y, screen.objects)
         setHoveredObjectId(hoveredObject?.id || null)
+        
+        // Check for SVG button hover
+        const hoveredButton = detectSvgButtonAt(coords.x, coords.y)
+        setHoveredSvgButtonId(hoveredButton)
 
         const hoveredSvgButton = detectSvgButtonAtPoint(coords.x, coords.y)
         setHoveredSvgButtonId(hoveredSvgButton || null)
@@ -1849,6 +2001,8 @@ export function Canvas({
                 ne: "ne-resize",
                 sw: "sw-resize",
                 se: "se-resize",
+                "baseline-left": "w-resize",
+                "baseline-right": "e-resize",
               }
               canvas.style.cursor = cursors[resizeHandle]
             } else {
@@ -1926,10 +2080,13 @@ export function Canvas({
           const snapResult = calculateSnap(
             { x: rawX, y: rawY, width: dragState.startObjectPos.width, height: dragState.startObjectPos.height },
             otherObjects,
+            false,
+            draggedObject.type,
+            draggedObject,
           )
 
-          const newX = Math.round(Math.max(0, Math.min(screenWidth - dragState.startObjectPos.width, snapResult.x)))
-          const newY = Math.round(Math.max(0, Math.min(screenHeight - dragState.startObjectPos.height, snapResult.y)))
+          const newX = Math.round(snapResult.x)
+          const newY = Math.round(snapResult.y)
 
           // Calculate the offset for this specific object
           const offsetX = newX - draggedObject.x
@@ -1940,9 +2097,9 @@ export function Canvas({
 
           // Update all selected objects with the same offset
           selectedObjects.forEach((obj) => {
-            const constrainedX = Math.max(0, Math.min(screenWidth - obj.width, obj.x + offsetX))
-            const constrainedY = Math.max(0, Math.min(screenHeight - obj.height, obj.y + offsetY))
-            onUpdateObject(obj.id, { x: constrainedX, y: constrainedY })
+            const newX = obj.x + offsetX
+            const newY = obj.y + offsetY
+            onUpdateObject(obj.id, { x: newX, y: newY })
           })
         }
       } else if (dragState.mode === "line-endpoint" && dragState.objectId && dragState.lineHandle) {
@@ -1963,7 +2120,7 @@ export function Canvas({
         }
 
         const otherObjects = screen.objects.filter((obj) => obj.id !== dragState.objectId)
-        const snapResult = calculateSnap({ x: newX, y: newY, width: newWidth, height: newHeight }, otherObjects, false)
+        const snapResult = calculateSnap({ x: newX, y: newY, width: newWidth, height: newHeight }, otherObjects, false, dragState.objectId ? screen.objects.find(obj => obj.id === dragState.objectId)?.type : undefined, dragState.objectId ? screen.objects.find(obj => obj.id === dragState.objectId) : undefined)
 
         if (dragState.lineHandle === "start") {
           newX = snapResult.x
@@ -1989,13 +2146,11 @@ export function Canvas({
           newHeight = snappedEndY - y
         }
 
-        newX = Math.round(Math.max(0, Math.min(screenWidth, newX)))
-        newY = Math.round(Math.max(0, Math.min(screenHeight, newY)))
+        newX = Math.round(newX)
+        newY = Math.round(newY)
 
-        if (newX + newWidth < 0) newWidth = -newX
-        if (newX + newWidth > screenWidth) newWidth = screenWidth - newX
-        if (newY + newHeight < 0) newHeight = -newY
-        if (newY + newHeight > screenHeight) newHeight = screenHeight - newY
+        // Remove screen boundary constraints - allow objects to go off-screen
+        // Only maintain minimum size constraints
 
         setActiveSnapLines(snapResult.snapLines)
         onUpdateObject(dragState.objectId, {
@@ -2064,6 +2219,17 @@ export function Canvas({
               newHeight = size
             }
             break
+          case "baseline-left":
+            // Only resize width, keep height fixed for text objects
+            newX = Math.round(Math.min(x + width - 10, x + deltaX))
+            newWidth = Math.round(width - (newX - x))
+            newHeight = height // Keep height unchanged
+            break
+          case "baseline-right":
+            // Only resize width, keep height fixed for text objects
+            newWidth = Math.round(Math.max(10, width + deltaX))
+            newHeight = height // Keep height unchanged
+            break
         }
 
         const snapLines: { type: "vertical" | "horizontal"; position: number }[] = []
@@ -2125,18 +2291,36 @@ export function Canvas({
               }
             })
             break
+          case "baseline-left":
+            snapGuides.forEach((guide) => {
+              if (guide.type === "vertical" && Math.abs(newX - guide.position) <= SNAP_TOLERANCE / zoom) {
+                const snapDelta = guide.position - x // Use original x, not newX
+                newX = Math.round(guide.position)
+                newWidth = Math.round(width - snapDelta)
+                snapLines.push({ type: "vertical", position: guide.position })
+              }
+            })
+            break
+          case "baseline-right":
+            snapGuides.forEach((guide) => {
+              if (guide.type === "vertical" && Math.abs(newX + newWidth - guide.position) <= SNAP_TOLERANCE / zoom) {
+                newWidth = Math.round(guide.position - newX)
+                snapLines.push({ type: "vertical", position: guide.position })
+              }
+            })
+            break
         }
 
         const hasVerticalSnap = snapLines.some((line) => line.type === "vertical")
         const hasHorizontalSnap = snapLines.some((line) => line.type === "horizontal")
 
         if (!hasVerticalSnap) {
-          const constrainedX = Math.round(Math.max(0, Math.min(screenWidth - newWidth, newX)))
-          newX = constrainedX
+          // Allow objects to go off-screen for all handle types
+          newX = Math.round(newX)
         }
         if (!hasHorizontalSnap) {
-          const constrainedY = Math.round(Math.max(0, Math.min(screenHeight - newHeight, newY)))
-          newY = constrainedY
+          // Allow objects to go off-screen for all handle types  
+          newY = Math.round(newY)
         }
 
         newWidth = Math.round(Math.max(10, newWidth))
